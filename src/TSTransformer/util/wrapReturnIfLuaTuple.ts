@@ -45,8 +45,19 @@ function shouldWrapLuaTuple(state: TransformState, node: ts.CallExpression, exp:
 		return false;
 	}
 
-	// `foo()[n]`
+	// `[foo(), true]`
+	if (ts.isArrayLiteralExpression(parent)) {
+		return true;
+	}
+
+	// `foo()[n]` - but if the indexed result is immediately called, we need to wrap
+	// e.g., `foo()[0]()` needs wrapping to become `({ foo() })[1]()`
 	if (ts.isElementAccessExpression(parent) && parent.questionDotToken === undefined) {
+		const grandparent = skipUpwards(parent).parent;
+		// If the indexed result is called, we need to wrap the LuaTuple
+		if (ts.isCallExpression(grandparent) && grandparent.expression === skipUpwards(parent)) {
+			return true;
+		}
 		return false;
 	}
 

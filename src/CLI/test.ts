@@ -1,6 +1,8 @@
 /// <reference types="jest" />
 
+import { spawnSync } from "child_process";
 import fs from "fs-extra";
+import os from "os";
 import path from "path";
 import { compileFiles } from "Project/functions/compileFiles";
 import { copyFiles } from "Project/functions/copyFiles";
@@ -29,9 +31,10 @@ describe("should compile tests project", () => {
 	);
 	const program = createProjectProgram(data);
 	const pathTranslator = createPathTranslator(program, data);
+	const outDir = program.getCompilerOptions().outDir!;
 
 	// clean outDir between test runs
-	fs.removeSync(program.getCompilerOptions().outDir!);
+	fs.removeSync(outDir);
 
 	it("should copy include files", () => copyInclude(data));
 
@@ -41,6 +44,7 @@ describe("should compile tests project", () => {
 	const diagnosticsFolder = path.join(PACKAGE_ROOT, "tests", "src", "diagnostics");
 
 	const sourceFiles = getChangedSourceFiles(program);
+	console.log("Files to compile:", sourceFiles.map(sf => path.relative(process.cwd(), sf.fileName)).join(", "));
 
 	for (const sourceFile of sourceFiles) {
 		const fileName = path.relative(process.cwd(), sourceFile.fileName);
@@ -79,4 +83,312 @@ describe("should compile tests project", () => {
 			});
 		}
 	}
+
+	it("should preserve prereq ordering in generated Luau (regression tests)", () => {
+		const readLuau = (...segments: Array<string>) => fs.readFileSync(path.join(outDir, ...segments)).toString();
+		const expectSequence = (source: string, sequence: Array<string>) => {
+			let pos = 0;
+			for (const needle of sequence) {
+				const idx = source.indexOf(needle, pos);
+				expect(idx).toBeGreaterThanOrEqual(0);
+				pos = idx + needle.length;
+			}
+		};
+		const sliceBetween = (source: string, startNeedle: string, endNeedle?: string) => {
+			const start = source.indexOf(startNeedle);
+			expect(start).toBeGreaterThanOrEqual(0);
+			if (endNeedle !== undefined) {
+				const end = source.indexOf(endNeedle, start + startNeedle.length);
+				expect(end).toBeGreaterThanOrEqual(0);
+				return source.slice(start, end);
+			}
+			return source.slice(start);
+		};
+
+		{
+			const luau = readLuau("tests", "binary.spec.luau");
+			const section = sliceBetween(luau, 'it("should support comma operator"', "end)\nend\n");
+			expectSequence(section, [
+				"local x = 0",
+				"local _exp = expect(x).to.equal(0)",
+				"x = 1",
+				"local _to = expect(x).to",
+				"_to.equal(1)",
+				"local _exp_1 = expect(x).to.equal(1)",
+				"x = 3",
+				"local _to_1 = expect(x).to",
+				"_to_1.equal(3)",
+			]);
+		}
+
+		{
+			const luau = readLuau("tests", "binary.spec.luau");
+			const section = sliceBetween(
+				luau,
+				'it("should push WritableOperandNames"',
+				'it("should support unary expressions on indexed parenthesized expressions"',
+			);
+			expectSequence(section, ["local _original = numItems", "numItems += 1", "self.id = _original"]);
+		}
+
+		{
+			const luau = readLuau("tests", "object.spec.luau");
+			const section = sliceBetween(luau, 'it("should support computed members"', "end)\nend\n");
+			expectSequence(section, ["local _left = a", "a = 9", "_object[_left] ="]);
+		}
+
+		{
+			const luau = readLuau("tests", "object.spec.luau");
+			const section = sliceBetween(
+				luau,
+				'it("should support invalid Lua identifier members"',
+				'it("should support shorthand assignments"',
+			);
+			expectSequence(section, ['local _original = o["$v"]', 'o["$v"] += 1', "local _to = expect(_original).to"]);
+		}
+
+		{
+			const luau = readLuau("tests", "class.spec.luau");
+			const nested = sliceBetween(
+				luau,
+				'it("should support nested classes which refer to the outer class"',
+				'it("should support methods keys that emit prereqs"',
+			);
+			expectSequence(nested, ["local _class", "_class = B", "A.member = _class"]);
+
+			const computedKeys = sliceBetween(luau, 'it("should support methods keys that emit prereqs"');
+			expectSequence(computedKeys, ["local i = 0", "i += 1", "A[i] = function", "i += 1", "A[i] = function"]);
+		}
+
+		{
+			const luau = readLuau("tests", "switch.spec.luau");
+			const context = sliceBetween(
+				luau,
+				'it("should support switch statements with context"',
+				'it("should support switch statements with fallthrough and context"',
+			);
+			expectSequence(context, [
+				"local _exp = n",
+				"local _original = x",
+				"x += 1",
+				"if _exp == _original then",
+				"local _original_1 = x",
+				"x += 1",
+				"if _exp == _original_1 then",
+			]);
+
+			const fallthroughContext = sliceBetween(
+				luau,
+				'it("should support switch statements with fallthrough and context"',
+				'it("should support switch statements with preceding statements"',
+			);
+			expectSequence(fallthroughContext, [
+				"local _exp = n",
+				"local _fallthrough = false",
+				"local _original = x",
+				"x += 1",
+				"if _exp == _original then",
+				"_fallthrough = true",
+				"local _original_1 = x",
+				"x += 1",
+				"_fallthrough = _exp == _original_1",
+			]);
+		}
+
+		{
+			const luau = readLuau("tests", "assignment.spec.luau");
+
+			const nullishStatement = sliceBetween(
+				luau,
+				'it("should support logical null coalescing assignment statement"',
+				'it("should support logical or assignment statement"',
+			);
+			expectSequence(nullishStatement, ["local x", "if x == nil then", "x = true", "expect(x).to.equal(true)"]);
+
+			const orStatement = sliceBetween(
+				luau,
+				'it("should support logical or assignment statement"',
+				'it("should support logical and assignment statement"',
+			);
+			expectSequence(orStatement, [
+				"local _condition = x",
+				"if not x then",
+				"_condition = true",
+				"x = _condition",
+			]);
+
+			const andStatement = sliceBetween(
+				luau,
+				'it("should support logical and assignment statement"',
+				'it("should support logical null coalescing assignment expression"',
+			);
+			expectSequence(andStatement, ["local _condition = x", "if x then", "_condition = false", "x = _condition"]);
+
+			const nullishExpr = sliceBetween(
+				luau,
+				'it("should support logical null coalescing assignment expression"',
+				'it("should support logical or assignment expression"',
+			);
+			expectSequence(nullishExpr, [
+				"if x == nil then",
+				"x = true",
+				"local _to = expect(x).to",
+				"_to.equal(true)",
+			]);
+
+			const orExpr = sliceBetween(
+				luau,
+				'it("should support logical or assignment expression"',
+				'it("should support logical and assignment expression"',
+			);
+			expectSequence(orExpr, ["local _condition = x", "if not x then", "_condition = true", "x = _condition"]);
+
+			const andExpr = sliceBetween(luau, 'it("should support logical and assignment expression"');
+			expectSequence(andExpr, ["local _condition = x", "if x then", "_condition = false", "x = _condition"]);
+		}
+	});
+});
+
+describe("CLI commands", () => {
+	it("should have sourcemap command available", () => {
+		const sourcemapPath = path.join(PACKAGE_ROOT, "out", "CLI", "commands", "sourcemap.js");
+		expect(fs.existsSync(sourcemapPath)).toBe(true);
+	});
+
+	it("should have typegen command available", () => {
+		const typegenPath = path.join(PACKAGE_ROOT, "out", "CLI", "commands", "typegen.js");
+		expect(fs.existsSync(typegenPath)).toBe(true);
+	});
+
+	it("should have .luau include files", () => {
+		const includePath = path.join(PACKAGE_ROOT, "include");
+		expect(fs.existsSync(path.join(includePath, "Promise.luau"))).toBe(true);
+		expect(fs.existsSync(path.join(includePath, "RuntimeLib.luau"))).toBe(true);
+	});
+
+	it("should generate .d.ts from a Luau module table export (experimental)", () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "rbxtsc-typegen-"));
+		const inputFile = path.join(tmpDir, "MyLib.luau");
+		const outDir = path.join(tmpDir, "out");
+
+		fs.writeFileSync(
+			inputFile,
+			[
+				"local M = {}",
+				"",
+				"---@param x number",
+				"---@param y string",
+				"---@return boolean",
+				"function M.foo(x, y)",
+				"\treturn true",
+				"end",
+				"",
+				"M.bar = 123",
+				"M.baz = function(z)",
+				"\treturn z",
+				"end",
+				"",
+				"return M",
+			].join("\n"),
+		);
+
+		fs.ensureDirSync(outDir);
+		const cliPath = path.join(PACKAGE_ROOT, "out", "CLI", "cli.js");
+		const result = spawnSync(process.execPath, [cliPath, "typegen", "-i", inputFile, "-o", outDir], {
+			cwd: PACKAGE_ROOT,
+			encoding: "utf8",
+		});
+		expect(result.status).toBe(0);
+
+		const dtsPath = path.join(outDir, "MyLib.d.ts");
+		expect(fs.existsSync(dtsPath)).toBe(true);
+		const dts = fs.readFileSync(dtsPath, "utf-8");
+		expect(dts).toContain("function foo(x: number, y: string): boolean;");
+		expect(dts).toContain("const bar: unknown;");
+		expect(dts).toContain("function baz(z: unknown): unknown;");
+	});
+
+	it("should generate .d.ts from a Luau table literal return (experimental)", () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "rbxtsc-typegen-"));
+		const inputFile = path.join(tmpDir, "ReturnTable.luau");
+		const outDir = path.join(tmpDir, "out");
+
+		fs.writeFileSync(
+			inputFile,
+			["return {", "\tfoo = function(a)", "\t\treturn a", "\tend,", "\tbar = 123,", "}"].join("\n"),
+		);
+
+		fs.ensureDirSync(outDir);
+		const cliPath = path.join(PACKAGE_ROOT, "out", "CLI", "cli.js");
+		const result = spawnSync(process.execPath, [cliPath, "typegen", "-i", inputFile, "-o", outDir], {
+			cwd: PACKAGE_ROOT,
+			encoding: "utf8",
+		});
+		expect(result.status).toBe(0);
+
+		const dtsPath = path.join(outDir, "ReturnTable.d.ts");
+		expect(fs.existsSync(dtsPath)).toBe(true);
+		const dts = fs.readFileSync(dtsPath, "utf-8");
+		expect(dts).toContain("declare const ReturnTable");
+		expect(dts).toContain("foo: (a: unknown) => unknown;");
+		expect(dts).toContain("bar: unknown;");
+	});
+
+	it("should generate .d.ts from a Luau function export (return identifier) (experimental)", () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "rbxtsc-typegen-"));
+		const inputFile = path.join(tmpDir, "FuncExportId.luau");
+		const outDir = path.join(tmpDir, "out");
+
+		fs.writeFileSync(
+			inputFile,
+			[
+				"---@param x number",
+				"---@return string",
+				"local function main(x)",
+				"\treturn tostring(x)",
+				"end",
+				"",
+				"return main",
+			].join("\n"),
+		);
+
+		fs.ensureDirSync(outDir);
+		const cliPath = path.join(PACKAGE_ROOT, "out", "CLI", "cli.js");
+		const result = spawnSync(process.execPath, [cliPath, "typegen", "-i", inputFile, "-o", outDir], {
+			cwd: PACKAGE_ROOT,
+			encoding: "utf8",
+		});
+		expect(result.status).toBe(0);
+
+		const dtsPath = path.join(outDir, "FuncExportId.d.ts");
+		expect(fs.existsSync(dtsPath)).toBe(true);
+		const dts = fs.readFileSync(dtsPath, "utf-8");
+		expect(dts).toContain("declare function FuncExportId(x: number): string;");
+		expect(dts).toContain("export = FuncExportId;");
+	});
+
+	it("should generate .d.ts from a Luau function export (return function literal) (experimental)", () => {
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "rbxtsc-typegen-"));
+		const inputFile = path.join(tmpDir, "FuncExportLit.luau");
+		const outDir = path.join(tmpDir, "out");
+
+		fs.writeFileSync(
+			inputFile,
+			["---@param name string", "---@return string", "return function(name)", "\treturn name", "end"].join("\n"),
+		);
+
+		fs.ensureDirSync(outDir);
+		const cliPath = path.join(PACKAGE_ROOT, "out", "CLI", "cli.js");
+		const result = spawnSync(process.execPath, [cliPath, "typegen", "-i", inputFile, "-o", outDir], {
+			cwd: PACKAGE_ROOT,
+			encoding: "utf8",
+		});
+		expect(result.status).toBe(0);
+
+		const dtsPath = path.join(outDir, "FuncExportLit.d.ts");
+		expect(fs.existsSync(dtsPath)).toBe(true);
+		const dts = fs.readFileSync(dtsPath, "utf-8");
+		expect(dts).toContain("declare function FuncExportLit(name: string): string;");
+		expect(dts).toContain("export = FuncExportLit;");
+	});
 });

@@ -3,6 +3,7 @@ import { errors } from "Shared/diagnostics";
 import { assert } from "Shared/util/assert";
 import { TransformState } from "TSTransformer";
 import { DiagnosticService } from "TSTransformer/classes/DiagnosticService";
+import { Prereqs } from "TSTransformer/classes/Prereqs";
 import {
 	transformClassConstructor,
 	transformImplicitClassConstructor,
@@ -86,11 +87,10 @@ function createBoilerplate(
 		);
 
 		if (extendsNode) {
-			const [extendsExp, extendsExpPrereqs] = state.capture(() =>
-				transformExpression(state, extendsNode.expression),
-			);
+			const extendsExpPrereqs = new Prereqs();
+			const extendsExp = transformExpression(state, extendsExpPrereqs, extendsNode.expression);
 			const superId = luau.id("super");
-			luau.list.pushList(statements, extendsExpPrereqs);
+			luau.list.pushList(statements, extendsExpPrereqs.statements);
 			luau.list.push(
 				statements,
 				luau.create(luau.SyntaxKind.VariableDeclaration, {
@@ -116,7 +116,7 @@ function createBoilerplate(
 			luau.list.push(
 				statements,
 				luau.create(luau.SyntaxKind.VariableDeclaration, {
-					left: transformIdentifierDefined(state, node.name),
+					left: transformIdentifierDefined(state, new Prereqs(), node.name),
 					right: metatable,
 				}),
 			);
@@ -221,7 +221,7 @@ export function transformClassLikeDeclaration(state: TransformState, node: ts.Cl
 	if (shouldUseInternalName) {
 		returnVar = luau.tempId("class");
 	} else if (node.name) {
-		returnVar = transformIdentifierDefined(state, node.name);
+		returnVar = transformIdentifierDefined(state, new Prereqs(), node.name);
 	} else if (isExportDefault) {
 		returnVar = luau.id("default");
 	} else {
@@ -230,7 +230,7 @@ export function transformClassLikeDeclaration(state: TransformState, node: ts.Cl
 
 	let internalName: luau.Identifier | luau.TemporaryIdentifier;
 	if (shouldUseInternalName) {
-		internalName = transformIdentifierDefined(state, node.name);
+		internalName = transformIdentifierDefined(state, new Prereqs(), node.name);
 	} else {
 		internalName = returnVar;
 	}

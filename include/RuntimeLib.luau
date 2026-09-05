@@ -10,6 +10,18 @@ local TS = {}
 
 TS.Promise = Promise
 
+-- Initialize sourcemap support if available (must be before TS.try definition)
+TS.SourcemapModule = nil
+pcall(function()
+	local sourcemapScript = script.Parent:FindFirstChild("RuntimeLib.Sourcemap")
+	if sourcemapScript and sourcemapScript:IsA("ModuleScript") then
+		TS.SourcemapModule = require(sourcemapScript)
+		if TS.SourcemapModule and TS.SourcemapModule.init then
+			TS.SourcemapModule.init()
+		end
+	end
+end)
+
 local SymbolRegistry = {}
 local Symbol = setmetatable({}, {
 	__call = function(_, description)
@@ -95,7 +107,12 @@ local registeredLibraries = {}
 
 function TS.import(context, module, ...)
 	for i = 1, select("#", ...) do
-		module = module:WaitForChild((select(i, ...)))
+		local childName = select(i, ...)
+		local child = module:WaitForChild(childName, 10)
+		if not child then
+			error(OUTPUT_PREFIX .. "Failed to import! Could not find '" .. childName .. "' in " .. module:GetFullName(), 2)
+		end
+		module = child
 	end
 
 	if module.ClassName ~= "ModuleScript" then
@@ -259,6 +276,10 @@ function TS.try(try, catch, finally)
 		exitType = exitTypeOrTryError
 	else
 		tryError = exitTypeOrTryError
+		-- Enhance error with sourcemap if available
+		if TS.SourcemapModule and TS.SourcemapModule.enhanceError then
+			tryError = TS.SourcemapModule.enhanceError(tostring(tryError))
+		end
 	end
 
 	local catchSuccess = true
@@ -342,6 +363,48 @@ function TS.using(resource, body)
 	end
 
 	return result
+end
+
+-- Async Explicit Resource Management (await using statements)
+function TS.asyncUsing(resource, body)
+	return Promise.new(function(resolve, reject)
+		local success, result = pcall(body, resource)
+
+		-- Always call asyncDispose (or dispose as fallback), even if body threw
+		local disposePromise
+		if resource ~= nil then
+			local asyncDisposeMethod = resource[Symbol.asyncDispose]
+			if type(asyncDisposeMethod) == "function" then
+				disposePromise = asyncDisposeMethod(resource)
+			else
+				local disposeMethod = resource[Symbol.dispose]
+				if type(disposeMethod) == "function" then
+					disposeMethod(resource)
+				end
+			end
+		end
+
+		-- Handle async dispose
+		local function finalize()
+			if not success then
+				reject(result)
+			else
+				resolve(result)
+			end
+		end
+
+		if disposePromise and type(disposePromise.andThen) == "function" then
+			disposePromise:andThen(finalize):catch(function(disposeErr)
+				if not success then
+					reject(result) -- Original error takes precedence
+				else
+					reject(disposeErr)
+				end
+			end)
+		else
+			finalize()
+		end
+	end)
 end
 
 function TS.disposableStack()

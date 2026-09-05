@@ -1,6 +1,7 @@
 import luau from "@roblox-ts/luau-ast";
 import { assert } from "Shared/util/assert";
 import { TransformState } from "TSTransformer";
+import { Prereqs } from "TSTransformer/classes/Prereqs";
 import { transformExpression } from "TSTransformer/nodes/expressions/transformExpression";
 import { transformPropertyName } from "TSTransformer/nodes/transformPropertyName";
 import { convertToIndexableExpression } from "TSTransformer/util/convertToIndexableExpression";
@@ -67,9 +68,9 @@ function transformMemberDecorators(
 
 	for (let i = 0; i < decorators.length; i++) {
 		const decorator = decorators[i];
-		let [expression, prereqs] = state.capture(() => transformExpression(state, decorator.expression));
-
-		luau.list.pushList(initializers, prereqs);
+		const prereqs = new Prereqs();
+		let expression = transformExpression(state, prereqs, decorator.expression);
+		luau.list.pushList(initializers, prereqs.statements);
 
 		const isLastDecorator = i === decorators.length - 1;
 
@@ -163,7 +164,7 @@ function transformPropertyDecorators(
 ): luau.List<luau.Statement> {
 	const [initializers, finalizers] = transformMemberDecorators(state, member, expression => {
 		// typescript enforces that property keys are static, so they shouldn't have prereqs
-		const key = state.noPrereqs(() => transformPropertyName(state, member.name));
+		const key = state.noPrereqs(() => transformPropertyName(state, new Prereqs(), member.name));
 
 		// decorator(Class, "name")
 		return luau.list.make(

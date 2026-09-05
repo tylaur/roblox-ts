@@ -1,0 +1,192 @@
+
+import { execSync } from "child_process";
+import * as fs from "fs-extra";
+import * as path from "path";
+import * as readline from "readline";
+
+function getLatestBetaVersion(packageName: string): string | null {
+	try {
+		const output = execSync(`npm view ${packageName} versions --json`, { encoding: 'utf-8' });
+		const versions: string[] = JSON.parse(output);
+		const betaVersions = versions.filter(v => v.includes('-beta.'));
+		if (betaVersions.length === 0) return null;
+		return betaVersions[betaVersions.length - 1];
+	} catch (e) {
+		return null;
+	}
+}
+
+function incrementBetaVersion(baseVersion: string): string {
+	// baseVersion format: "3.0.9-beta.1"
+	const latestPublished = getLatestBetaVersion('@radomiej/roblox-ts');
+
+	if (!latestPublished) {
+		// No beta version published yet, start with .1
+		return `${baseVersion}-beta.1`;
+	}
+
+	// Extract beta number from published version
+	const match = latestPublished.match(/-beta\.(\d+)$/);
+	if (!match) {
+		return `${baseVersion}-beta.1`;
+	}
+
+	const currentBetaNum = parseInt(match[1], 10);
+	const nextBetaNum = currentBetaNum + 1;
+
+	// Extract base version (e.g., "3.0.9" from "3.0.9-beta.1")
+	const publishedBase = latestPublished.split('-beta.')[0];
+
+	// If base version changed, reset to .1, otherwise increment
+	if (publishedBase !== baseVersion) {
+		return `${baseVersion}-beta.1`;
+	}
+
+	return `${baseVersion}-beta.${nextBetaNum}`;
+}
+
+async function updatePackageVersion(packagePath: string, newVersion: string) {
+	const pkg = await fs.readJSON(packagePath);
+	pkg.version = newVersion;
+	await fs.writeJSON(packagePath, pkg, { spaces: '\t' });
+	console.log(`Updated ${path.basename(path.dirname(packagePath))} to version ${newVersion}`);
+}
+
+const ROOT_DIR = path.join(__dirname, "..");
+const COMPILER_TYPES_DIR = path.join(ROOT_DIR, "submodules/compiler-types");
+const TS_EXPOSE_INTERNALS_DIR = path.join(ROOT_DIR, "submodules/ts-expose-internals");
+
+function run(command: string, cwd: string, env: NodeJS.ProcessEnv = process.env) {
+	console.log(`> ${command}`);
+	execSync(command, { cwd, stdio: "inherit", env });
+}
+
+function prompt(question: string, hidden: boolean = false): Promise<string> {
+	const rl = readline.createInterface({
+		input: process.stdin,
+		output: process.stdout,
+	});
+
+	return new Promise((resolve) => {
+		rl.question(question, (answer) => {
+			rl.close();
+			resolve(answer.trim());
+		});
+		// Simple visual hiding for tokens isn't standard in basic readline,
+		// but we can at least not echo if we used a more complex lib.
+		// For this simple script, standard input is fine, or we trust the user.
+	});
+}
+
+async function main() {
+	try {
+		console.log("=== Publishing @radomiej/roblox-ts ecosystem ===");
+
+		// Base version for 3.1.0 release
+		console.log("\n--- Version Configuration ---");
+		const baseVersion = "3.1.0";
+		const newVersion = incrementBetaVersion(baseVersion);
+		console.log(`Next version will be: ${newVersion}`);
+
+		// Update package.json files
+		await updatePackageVersion(path.join(ROOT_DIR, "package.json"), newVersion);
+		await updatePackageVersion(path.join(COMPILER_TYPES_DIR, "package.json"), `${newVersion.replace('-beta', '-types.beta')}`);
+
+		// ts-expose-internals uses TypeScript version as base
+		const tsExposeVersion = `5.9.3-beta.${newVersion.split('-beta.')[1] || '1'}`;
+		await updatePackageVersion(path.join(TS_EXPOSE_INTERNALS_DIR, "package.json"), tsExposeVersion);
+
+        console.log("Choose authentication method:");
+        console.log("1. Use OTP (2FA code) with currently logged in user");
+        console.log("2. Use an Authorization Token (CI/Automation token)");
+
+        const choice = await prompt("Enter 1 or 2: ");
+        let authEnv = { ...process.env };
+        let otpFlag = "";
+
+        if (choice === "2") {
+            const token = await prompt("Enter NPM Token: ");
+            if (!token) throw new Error("Token cannot be empty");
+            // Set the token in the environment for the command
+            // npm/yarn often look for NPM_TOKEN or we can set .npmrc
+            // The most reliable way for a single session is often creating a temporary .npmrc
+            // But 'npm config set' is persistent.
+            // Better: passing the token in the command line auth string is deprecated/tricky.
+            // We will use a temporary .npmrc in the CWD of execution or set NODE_AUTH_TOKEN if supported by .npmrc
+
+            // Actually, simply writing a .npmrc with the token is the standard way.
+            const npmrcContent = `//registry.npmjs.org/:_authToken=${token}`;
+            // We will write this to the target directories temporarily
+            await fs.writeFile(path.join(COMPILER_TYPES_DIR, ".npmrc"), npmrcContent);
+            await fs.writeFile(path.join(ROOT_DIR, ".npmrc"), npmrcContent);
+            await fs.writeFile(path.join(TS_EXPOSE_INTERNALS_DIR, ".npmrc"), npmrcContent);
+
+            console.log("Token configured in temporary .npmrc files.");
+
+            try {
+                console.log("Verifying token...");
+                run("npm whoami", ROOT_DIR, authEnv);
+            } catch (e) {
+                console.error("Warning: 'npm whoami' failed with this token. It might be invalid.");
+            }
+        } else {
+            const otp = await prompt("Enter NPM OTP code: ");
+            if (otp) {
+                otpFlag = ` --otp=${otp}`;
+            } else {
+                console.log("No OTP provided, attempting publish without it (may fail if 2FA is enforced)...");
+            }
+        }
+
+		// 1. Publish ts-expose-internals
+		console.log("\n--- Publishing ts-expose-internals ---");
+		try {
+            run(`npm publish --tag beta --access public${otpFlag}`, TS_EXPOSE_INTERNALS_DIR, authEnv);
+        } catch(e) {
+            console.error("Failed to publish ts-expose-internals. Continuing...");
+        }
+
+		// 2. Publish compiler-types
+		console.log("\n--- Publishing compiler-types ---");
+		try {
+            run(`npm publish --tag beta --access public${otpFlag}`, COMPILER_TYPES_DIR, authEnv);
+        } catch(e) {
+            console.error("Failed to publish compiler-types. Continuing to main package...");
+        }
+
+		console.log("\n--- Publishing roblox-ts ---");
+
+		// 3. Build roblox-ts
+		console.log("Building roblox-ts...");
+		run("npm run build", ROOT_DIR, authEnv);
+
+		// 4. Publish roblox-ts
+		console.log("Publishing roblox-ts...");
+		run(`npm publish --tag beta --access public${otpFlag}`, ROOT_DIR, authEnv);
+
+		console.log("\nSUCCESS! Packages published.");
+
+        // Cleanup .npmrc if created
+        if (choice === "2") {
+             await fs.remove(path.join(COMPILER_TYPES_DIR, ".npmrc"));
+             await fs.remove(path.join(ROOT_DIR, ".npmrc"));
+             await fs.remove(path.join(TS_EXPOSE_INTERNALS_DIR, ".npmrc"));
+             console.log("Temporary .npmrc files removed.");
+        }
+
+	} catch (error) {
+		console.error("\nERROR: Publishing failed.");
+		console.error(error);
+
+        // Cleanup on error too
+        try {
+            await fs.remove(path.join(COMPILER_TYPES_DIR, ".npmrc"));
+            await fs.remove(path.join(ROOT_DIR, ".npmrc"));
+            await fs.remove(path.join(TS_EXPOSE_INTERNALS_DIR, ".npmrc"));
+        } catch {}
+
+		process.exit(1);
+	}
+}
+
+main();

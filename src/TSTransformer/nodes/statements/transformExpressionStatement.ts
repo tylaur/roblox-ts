@@ -1,5 +1,6 @@
 import luau from "@roblox-ts/luau-ast";
 import { TransformState } from "TSTransformer";
+import { Prereqs } from "TSTransformer/classes/Prereqs";
 import { transformExpression } from "TSTransformer/nodes/expressions/transformExpression";
 import { transformLogicalOrCoalescingAssignmentExpressionStatement } from "TSTransformer/nodes/transformLogicalOrCoalescingAssignmentExpression";
 import { transformWritableAssignment, transformWritableExpression } from "TSTransformer/nodes/transformWritable";
@@ -14,7 +15,9 @@ function transformUnaryExpressionStatement(
 	state: TransformState,
 	node: ts.PrefixUnaryExpression | ts.PostfixUnaryExpression,
 ) {
-	const writable = transformWritableExpression(state, node.operand, false);
+	const prereqs = new Prereqs();
+	const writable = transformWritableExpression(state, prereqs, node.operand, false);
+	state.prereqList(prereqs.statements);
 	const operator: luau.AssignmentOperator = node.operator === ts.SyntaxKind.PlusPlusToken ? "+=" : "-=";
 	return luau.create(luau.SyntaxKind.Assignment, {
 		left: writable,
@@ -43,13 +46,16 @@ export function transformExpressionStatementInner(
 				operatorKind as ts.AssignmentOperator,
 				valueType,
 			);
+			const prereqs = new Prereqs();
 			const { writable, readable, value } = transformWritableAssignment(
 				state,
+				prereqs,
 				expression.left,
 				expression.right,
 				operator === undefined,
 				operator === undefined,
 			);
+			state.prereqList(prereqs.statements);
 			if (operator !== undefined) {
 				return luau.list.make(
 					luau.create(luau.SyntaxKind.Assignment, {
@@ -80,7 +86,10 @@ export function transformExpressionStatementInner(
 		return luau.list.make(transformUnaryExpressionStatement(state, expression));
 	}
 
-	return wrapExpressionStatement(transformExpression(state, expression));
+	const prereqs = new Prereqs();
+	const exp = transformExpression(state, prereqs, expression);
+	state.prereqList(prereqs.statements);
+	return wrapExpressionStatement(exp);
 }
 
 export function transformExpressionStatement(state: TransformState, node: ts.ExpressionStatement) {

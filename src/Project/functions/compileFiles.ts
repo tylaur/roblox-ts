@@ -13,7 +13,7 @@ import { createTransformerWatcher } from "Project/transformers/createTransformer
 import { getPluginConfigs } from "Project/transformers/getPluginConfigs";
 import { getCustomPreEmitDiagnostics } from "Project/util/getCustomPreEmitDiagnostics";
 import { LogService } from "Shared/classes/LogService";
-import { ProjectType } from "Shared/constants";
+import { PACKAGE_ROOT, ProjectType } from "Shared/constants";
 import { ProjectData } from "Shared/types";
 import { assert } from "Shared/util/assert";
 import { benchmarkIfVerbose } from "Shared/util/benchmark";
@@ -87,7 +87,7 @@ export function compileFiles(
 	let runtimeLibRbxPath: RbxPath | undefined;
 	if (projectType !== ProjectType.Package) {
 		runtimeLibRbxPath = rojoResolver.getRbxPathFromFilePath(
-			path.join(data.projectOptions.includePath, "RuntimeLib.lua"),
+			path.join(data.projectOptions.includePath, "RuntimeLib.luau"),
 		);
 		if (!runtimeLibRbxPath) {
 			return emitResultFailure("Rojo project contained no data for include folder!");
@@ -196,6 +196,8 @@ export function compileFiles(
 	if (DiagnosticService.hasErrors()) return { emitSkipped: true, diagnostics: DiagnosticService.flush() };
 
 	const emittedFiles = new Array<string>();
+	const sourcemapData: Record<string, { source: string; lines: Record<string, number> }> = {};
+
 	if (fileWriteQueue.length > 0) {
 		benchmarkIfVerbose("writing compiled files", () => {
 			const afterDeclarations = compilerOptions.declaration
@@ -214,7 +216,195 @@ export function compileFiles(
 				if (compilerOptions.declaration) {
 					proxyProgram.emit(sourceFile, ts.sys.writeFile, undefined, true, { afterDeclarations });
 				}
+
+				// Generate sourcemap data if enabled
+				if (data.projectOptions.sourcemap) {
+					const relativePath = path.relative(compilerOptions.outDir!, outPath).replace(/\\/g, "/");
+					const sourceRelativePath = path.relative(data.projectPath, sourceFile.fileName).replace(/\\/g, "/");
+
+					// Build line mapping using TS source positions
+					const lines: Record<string, number> = {};
+					const luaLines = source.split("\n");
+					const tsLineCount = sourceFile.getLineAndCharacterOfPosition(sourceFile.getEnd()).line + 1;
+					const luaLineCount = luaLines.length;
+
+					// Calculate ratio for approximate mapping
+					const ratio = tsLineCount / luaLineCount;
+
+					// Find key landmarks in Lua source for better accuracy
+					const functionMatches: Array<{ luaLine: number; name: string; type: string }> = [];
+					for (let i = 0; i < luaLines.length; i++) {
+						const line = luaLines[i];
+						// Match function declarations: "function name(" or "local function name("
+						const funcMatch = line.match(/(?:local\s+)?function\s+(\w+(?::\w+)?)\s*\(/);
+						if (funcMatch) {
+							functionMatches.push({ luaLine: i + 1, name: funcMatch[1], type: "function" });
+						}
+						// Match comments that might indicate TS line numbers
+						const commentMatch = line.match(/--\s*(.+)\.ts:(\d+)/);
+						if (commentMatch) {
+							const _tsLineFromComment = parseInt(commentMatch[2], 10);
+							functionMatches.push({ luaLine: i + 1, name: `__comment_${i}`, type: "comment" });
+						}
+						// Match variable declarations as additional landmarks
+						const varMatch = line.match(/local\s+(\w+)\s*=/);
+						if (varMatch && !line.includes("function")) {
+							functionMatches.push({ luaLine: i + 1, name: varMatch[1], type: "variable" });
+						}
+					}
+
+					// Try to match Lua functions to TS functions for accurate mapping
+					const tsFunctions: Array<{ line: number; name: string; type: string }> = [];
+					ts.forEachChild(sourceFile, function visit(node) {
+						if (ts.isFunctionDeclaration(node) && node.name) {
+							const pos = sourceFile.getLineAndCharacterOfPosition(node.getStart());
+							tsFunctions.push({ line: pos.line + 1, name: node.name.text, type: "function" });
+						} else if (ts.isMethodDeclaration(node) && ts.isIdentifier(node.name)) {
+							const pos = sourceFile.getLineAndCharacterOfPosition(node.getStart());
+							tsFunctions.push({ line: pos.line + 1, name: node.name.text, type: "method" });
+						} else if (ts.isClassDeclaration(node) && node.name) {
+							const pos = sourceFile.getLineAndCharacterOfPosition(node.getStart());
+							tsFunctions.push({ line: pos.line + 1, name: node.name.text, type: "class" });
+						} else if (ts.isVariableStatement(node)) {
+							// Track variable declarations
+							node.declarationList.declarations.forEach(decl => {
+								if (ts.isIdentifier(decl.name)) {
+									const pos = sourceFile.getLineAndCharacterOfPosition(decl.name.getStart());
+									tsFunctions.push({ line: pos.line + 1, name: decl.name.text, type: "variable" });
+								}
+							});
+						} else if (ts.isExpressionStatement(node)) {
+							// Track expression statements (like obj.method() calls)
+							const pos = sourceFile.getLineAndCharacterOfPosition(node.getStart());
+							tsFunctions.push({ line: pos.line + 1, name: `__expr_${pos.line}`, type: "expression" });
+						}
+						ts.forEachChild(node, visit);
+					});
+
+					// Build mapping with landmarks for better accuracy
+					const landmarks: Array<{ luaLine: number; tsLine: number }> = [];
+
+					// Match landmarks by name and type with priority
+					for (const luaFunc of functionMatches) {
+						// Prioritize exact matches with same type
+						let tsFunc = tsFunctions.find(
+							f =>
+								f.type === luaFunc.type &&
+								(luaFunc.name === f.name ||
+									luaFunc.name.endsWith(":" + f.name) ||
+									luaFunc.name === f.name.replace(/^_+/, "")),
+						);
+
+						// Fallback to any type match
+						if (!tsFunc) {
+							tsFunc = tsFunctions.find(
+								f =>
+									luaFunc.name === f.name ||
+									luaFunc.name.endsWith(":" + f.name) ||
+									luaFunc.name === f.name.replace(/^_+/, ""),
+							);
+						}
+
+						if (tsFunc) {
+							landmarks.push({ luaLine: luaFunc.luaLine, tsLine: tsFunc.line });
+						}
+					}
+
+					// Add landmarks for print/error statements (common patterns)
+					for (let i = 0; i < luaLines.length; i++) {
+						const line = luaLines[i];
+						if (line.includes('print("---') || line.includes("error(")) {
+							// Find corresponding TS line with similar pattern
+							const tsSourceLines = sourceFile.text.split("\n");
+							for (let j = 0; j < tsSourceLines.length; j++) {
+								if (
+									(line.includes('print("---') && tsSourceLines[j].includes('print("---')) ||
+									(line.includes("error(") && tsSourceLines[j].includes("error("))
+								) {
+									landmarks.push({ luaLine: i + 1, tsLine: j + 1 });
+									break;
+								}
+							}
+						}
+					}
+
+					// Sort landmarks by Lua line
+					landmarks.sort((a, b) => a.luaLine - b.luaLine);
+
+					// Generate line mapping
+					for (let luaLine = 1; luaLine <= luaLineCount; luaLine++) {
+						let tsLine: number;
+
+						if (landmarks.length === 0) {
+							// No landmarks, use ratio-based mapping
+							tsLine = Math.min(Math.max(1, Math.round(luaLine * ratio)), tsLineCount);
+						} else {
+							// Find surrounding landmarks and interpolate
+							const before = landmarks.filter(l => l.luaLine <= luaLine).pop();
+							const after = landmarks.find(l => l.luaLine > luaLine);
+
+							if (before && after) {
+								// Interpolate between landmarks
+								const luaRange = after.luaLine - before.luaLine;
+								const tsRange = after.tsLine - before.tsLine;
+								const luaOffset = luaLine - before.luaLine;
+								tsLine = Math.round(before.tsLine + (luaOffset / luaRange) * tsRange);
+							} else if (before) {
+								// After last landmark, use ratio from that point
+								const luaOffset = luaLine - before.luaLine;
+								tsLine = Math.min(before.tsLine + Math.round(luaOffset * ratio), tsLineCount);
+							} else if (after) {
+								// Before first landmark, use ratio to that point
+								const luaRatio = luaLine / after.luaLine;
+								tsLine = Math.max(1, Math.round(after.tsLine * luaRatio));
+							} else {
+								tsLine = Math.min(Math.max(1, Math.round(luaLine * ratio)), tsLineCount);
+							}
+
+							// Clamp to valid range
+							tsLine = Math.min(Math.max(1, tsLine), tsLineCount);
+						}
+
+						lines[String(luaLine)] = tsLine;
+					}
+
+					sourcemapData[relativePath] = {
+						source: sourceRelativePath,
+						lines,
+					};
+				}
 			}
+		});
+	}
+
+	// Write sourcemap file if enabled
+	if (data.projectOptions.sourcemap && Object.keys(sourcemapData).length > 0) {
+		benchmarkIfVerbose("writing sourcemap", () => {
+			const packageJson = JSON.parse(fs.readFileSync(path.join(PACKAGE_ROOT, "package.json"), "utf8"));
+
+			// Convert to Lua table format
+			let luaTable = "{\n";
+			for (const [filePath, mapping] of Object.entries(sourcemapData)) {
+				luaTable += `\t["${filePath}"] = {\n`;
+				luaTable += `\t\tsource = "${mapping.source}",\n`;
+				luaTable += `\t\tlines = {\n`;
+				for (const [luaLine, tsLine] of Object.entries(mapping.lines)) {
+					luaTable += `\t\t\t["${luaLine}"] = ${tsLine},\n`;
+				}
+				luaTable += `\t\t},\n`;
+				luaTable += `\t},\n`;
+			}
+			luaTable += "}";
+
+			const sourcemapContent = `-- Generated by roblox-ts v${packageJson.version}
+-- Sourcemap for runtime error mapping
+return {
+	mappings = ${luaTable}
+}
+`;
+			const sourcemapPath = path.join(data.projectOptions.includePath, "Sourcemap.luau");
+			fs.outputFileSync(sourcemapPath, sourcemapContent);
+			LogService.writeLineIfVerbose(`Sourcemap written to ${sourcemapPath}`);
 		});
 	}
 

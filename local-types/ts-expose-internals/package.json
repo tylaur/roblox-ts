@@ -1,0 +1,7 @@
+{
+    "name": "@types/ts-expose-internals",
+    "version": "5.9.3",
+    "description": "Internal TypeScript types for roblox-ts",
+    "types": "index.d.ts",
+    "license": "MIT"
+}

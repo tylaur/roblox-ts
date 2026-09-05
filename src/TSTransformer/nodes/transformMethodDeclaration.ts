@@ -3,6 +3,7 @@ import { errors } from "Shared/diagnostics";
 import { assert } from "Shared/util/assert";
 import { TransformState } from "TSTransformer";
 import { DiagnosticService } from "TSTransformer/classes/DiagnosticService";
+import { Prereqs } from "TSTransformer/classes/Prereqs";
 import { transformParameters } from "TSTransformer/nodes/transformParameters";
 import { transformPropertyName } from "TSTransformer/nodes/transformPropertyName";
 import { transformStatementList } from "TSTransformer/nodes/transformStatementList";
@@ -31,7 +32,9 @@ export function transformMethodDeclaration(
 	let { statements, parameters, hasDotDotDot } = transformParameters(state, node);
 	luau.list.pushList(statements, transformStatementList(state, node.body, node.body.statements));
 
-	let name = transformPropertyName(state, node.name);
+	const namePrereqs = new Prereqs();
+	let name = transformPropertyName(state, namePrereqs, node.name);
+	luau.list.pushList(result, namePrereqs.statements);
 
 	if (ts.hasDecorators(node) || node.parameters.some(parameter => ts.hasDecorators(parameter))) {
 		if (!luau.isSimplePrimitive(name)) {
@@ -97,10 +100,9 @@ export function transformMethodDeclaration(
 	}
 
 	// we have to use `class[name] = function()`
-	luau.list.pushList(
-		result,
-		state.capturePrereqs(() => assignToMapPointer(state, ptr, name, expression)),
-	);
+	const assignPrereqs = new Prereqs();
+	assignToMapPointer(state, assignPrereqs, ptr, name, expression);
+	luau.list.pushList(result, assignPrereqs.statements);
 
 	return result;
 }
