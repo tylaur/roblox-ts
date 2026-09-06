@@ -69,6 +69,7 @@ const TRANSFORMER_BY_KIND = createTransformerMap([
 	[ts.SyntaxKind.ForInStatement, DIAGNOSTIC(errors.noForInStatement)],
 	[ts.SyntaxKind.LabeledStatement, DIAGNOSTIC(errors.noLabeledStatement)],
 	[ts.SyntaxKind.DebuggerStatement, DIAGNOSTIC(errors.noDebuggerStatement)],
+	[ts.SyntaxKind.SwitchStatement, DIAGNOSTIC(errors.noSwitchStatement)],
 
 	// regular transforms
 	[ts.SyntaxKind.Block, transformBlock],
@@ -88,7 +89,6 @@ const TRANSFORMER_BY_KIND = createTransformerMap([
 	[ts.SyntaxKind.ImportEqualsDeclaration, transformImportEqualsDeclaration],
 	[ts.SyntaxKind.ModuleDeclaration, transformModuleDeclaration],
 	[ts.SyntaxKind.ReturnStatement, transformReturnStatement],
-	[ts.SyntaxKind.SwitchStatement, transformSwitchStatement],
 	[ts.SyntaxKind.ThrowStatement, transformThrowStatement],
 	[ts.SyntaxKind.TryStatement, transformTryStatement],
 	[ts.SyntaxKind.VariableStatement, transformVariableStatement],

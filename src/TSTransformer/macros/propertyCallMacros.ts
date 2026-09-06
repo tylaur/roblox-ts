@@ -893,18 +893,18 @@ const READONLY_MAP_METHODS: MacroList<PropertyCallMacro> = {
 		const callbackId = prereqs.pushToVarIfNonId(args[0], "callback");
 		const keyId = luau.tempId("k");
 		const valueId = luau.tempId("v");
-		const safeValueId = luau.create(luau.SyntaxKind.IfExpression, {
-			condition: luau.binary(valueId, "==", state.TS(node, "__undefined")),
-			expression: luau.nil(),
-			alternative: valueId,
-		});
+		// const safeValueId = luau.create(luau.SyntaxKind.IfExpression, {
+		// 	condition: luau.binary(valueId, "==", state.TS(node, "__undefined")),
+		// 	expression: luau.nil(),
+		// 	alternative: valueId,
+		// });
 		prereqs.prereq(
 			luau.create(luau.SyntaxKind.ForStatement, {
 				ids: luau.list.make(keyId, valueId),
 				expression,
 				statements: luau.list.make(
 					luau.create(luau.SyntaxKind.CallStatement, {
-						expression: luau.call(callbackId, [safeValueId, keyId, expression]),
+						expression: luau.call(callbackId, [/**safeValueId**/ valueId, keyId, expression]),
 					}),
 				),
 			}),
@@ -917,16 +917,9 @@ const READONLY_MAP_METHODS: MacroList<PropertyCallMacro> = {
 		const keyExp = prereqs.pushToVarIfComplex(args[0], "key");
 		expression = prereqs.pushToVarIfComplex(expression, "exp");
 
-		const valueExp = luau.create(luau.SyntaxKind.ComputedIndexExpression, {
+		return luau.create(luau.SyntaxKind.ComputedIndexExpression, {
 			expression: convertToIndexableExpression(expression),
 			index: keyExp,
-		});
-		const valueId = prereqs.pushToVar(valueExp, "value");
-
-		return luau.create(luau.SyntaxKind.IfExpression, {
-			condition: luau.binary(valueId, "==", state.TS(node, "__undefined")),
-			expression: luau.nil(),
-			alternative: valueId,
 		});
 	},
 };
@@ -942,11 +935,7 @@ const MAP_METHODS: MacroList<PropertyCallMacro> = {
 		}
 
 		const valueId = prereqs.pushToVarIfComplex(valueExp, "value");
-		const safeValueId = luau.create(luau.SyntaxKind.IfExpression, {
-			condition: luau.binary(valueId, "==", luau.nil()),
-			expression: state.TS(node, "__undefined"),
-			alternative: valueId,
-		});
+
 		prereqs.prereq(
 			luau.create(luau.SyntaxKind.Assignment, {
 				left: luau.create(luau.SyntaxKind.ComputedIndexExpression, {
@@ -954,7 +943,7 @@ const MAP_METHODS: MacroList<PropertyCallMacro> = {
 					index: keyExp,
 				}),
 				operator: "=",
-				right: safeValueId,
+				right: valueId,
 			}),
 		);
 		return valueIsUsed ? expression : luau.none();

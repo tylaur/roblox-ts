@@ -107,6 +107,7 @@ export const errors = {
 
 	// banned statements
 	noForInStatement: error("for-in loop statements are not supported!"),
+	noSwitchStatement: error("switch statements are forbidden!"),
 	noLabeledStatement: error("labels are not supported!"),
 	noDebuggerStatement: error("`debugger` is not supported!"),
 
