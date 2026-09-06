@@ -1,3 +1,5 @@
+Edit: P.S. thank you to Radomiej for fixing so many things 🙂
+
 <div align="center"><img width=25% src="https://i.imgur.com/yCjHmng.png"></div>
 <h1 align="center"><a href="https://roblox-ts.com">roblox-ts</a></h1>
 <div align="center">A TypeScript-to-Luau Compiler for Roblox</div>
