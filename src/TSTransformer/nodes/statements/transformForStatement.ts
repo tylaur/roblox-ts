@@ -370,7 +370,7 @@ function isMutatedInBody(state: TransformState, identifier: ts.Identifier, body:
 
 function isProbablyInteger(state: TransformState, expression: ts.Expression): boolean {
 	if (ts.isNumericLiteral(expression)) {
-		return Number.isInteger(Number(expression.getText()));
+		return Number.isInteger(Number(expression.getText().replace(/_/g, "")));
 	} else if (ts.isBinaryExpression(expression)) {
 		if (
 			expression.operatorToken.kind === ts.SyntaxKind.PlusToken ||
